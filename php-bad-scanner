@@ -134,7 +134,7 @@ class ComboFinder {
   }
 }
 
-class ServerStateFinder {
+class ApplicationStateFinder {
   protected $callback;
   function __construct($callback) {
     $this->callback = $callback;
@@ -148,16 +148,16 @@ class ServerStateFinder {
   function acceptNext($scanner, $token) {
     $rule = null;
     if ($token[0] === T_EXIT) {
-      $rule = 'SERVERSTATE:EXIT';
+      $rule = 'APPLICATIONSTATE:EXIT';
     } elseif ($token[0] === T_STRING) {
       if (!$this->scope) {
         $fname = strtolower($token[1]);
         if ($fname === 'header') {
-          $rule = 'SERVERSTATE:HEADER';
+          $rule = 'APPLICATIONSTATE:HEADER';
         } elseif ($fname === 'session_start') {
-          $rule = 'SERVERSTATE:SESSION';
+          $rule = 'APPLICATIONSTATE:SESSION';
         } elseif ($fname === 'setrawcookie' || $fname === 'setcookie') {
-          $rule = 'SERVERSTATE:COOKIE';
+          $rule = 'APPLICATIONSTATE:COOKIE';
         }
       }
       $this->scope = false;
@@ -259,7 +259,7 @@ $path = getcwd();
 
 $inc_static = true;
 $inc_global = true;
-$inc_server_state = true;
+$inc_application_state = true;
 
 $args = $_SERVER['argv'];
 array_shift($args);
@@ -270,16 +270,17 @@ foreach ($args as $arg) {
     $inc_static = false;
   } elseif ($arg == '--no-global') {
     $inc_global = false;
-  } elseif ($arg == '--no-server-state') {
-    $inc_server_state = false;
+  } elseif ($arg == '--no-application-state') {
+    $inc_application_state = false;
   } elseif ($arg == '--help') {
     echo "USAGE: ".basename(__FILE__)." [OPTIONS] [PATH]\n";
     echo "  OPTIONS:\n";
-    echo "    --color\n";
-    echo "    --no-static\n";
-    echo "    --no-global\n";
-    echo "    --no-server-state\n";
-    echo "    --help\n";
+    echo "    --color          Print results in color.\n";
+    echo "    --no-static      Disable rules for static symbols.\n";
+    echo "    --no-global      Disable rules for global variables.\n";
+    echo "    --no-application-state\n";
+    echo "                     Disable rules for application state.\n";
+    echo "    --help           Show this help.\n";
     echo "  PATH defaults to current working dir.\n";
     exit;
   } else {
@@ -294,13 +295,18 @@ if ($inc_static) {
 if ($inc_global) {
   $finders[] = new GlobalFinder($printer);
 }
-if ($inc_server_state) {
-  $finders[] = new ServerStateFinder($printer);
+if ($inc_application_state) {
+  $finders[] = new ApplicationStateFinder($printer);
 }
 
-find_files(
-  $path,
-  FileTypeFilter::bind(
-    '/\.(php|inc)$/',
-    ComboFinder::bindArray($finders)));
+if (is_file($path)) {
+  $finder = ComboFinder::bindArray($finders);
+  call_user_func($finder, $path);
+} else {
+  find_files(
+    $path,
+    FileTypeFilter::bind(
+      '/\.(php|inc)$/',
+      ComboFinder::bindArray($finders)));
+}
 
