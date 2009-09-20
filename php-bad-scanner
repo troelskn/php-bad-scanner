@@ -1,0 +1,306 @@
+#!/usr/local/bin/php
+<?php
+
+function find_files($dir, $callback) {
+  $d = dir($dir);
+  $entries = array();
+  while (false !== ($entry = $d->read())) {
+    $entries[] = $entry;
+  }
+  $d->close();
+  foreach ($entries as $entry) {
+    $fullname = $dir."/".$entry;
+    if (is_dir($fullname) && $entry !== '.' && $entry !== '..') {
+      find_files($fullname, $callback);
+    } elseif (is_file($fullname)) {
+      call_user_func($callback, $fullname);
+    }
+  }
+}
+
+class PhpSourceScanner {
+  protected $filename;
+  protected $input;
+  function __construct($filename) {
+    $this->filename = $filename;
+  }
+  protected function init() {
+    $this->line = 1;
+    $this->col = 1;
+    $this->depth = 0;
+    $this->prelude = false;
+    $this->input = str_replace("\r\n", "\n", file_get_contents($this->filename));
+    $this->lines = explode("\n", $this->input);
+    $this->tokens = token_get_all($this->input);
+  }
+  function next() {
+    if (is_null($this->input)) {
+      $this->init();
+    }
+    if (count($this->tokens) === 0) {
+      return null;
+    }
+    $token = array_shift($this->tokens);
+    if (is_array($token)) {
+      list($token, $text) = $token;
+    } else if (is_string($token)) {
+      $text = $token;
+    }
+    $tmp = $text;
+    // update line count
+    $numNewLines = substr_count($tmp, "\n");
+    if (1 <= $numNewLines) {
+      // have new lines, add them in
+      $this->line += $numNewLines;
+      $this->col  =  1;
+
+      // skip to right past the last new line, as it won't affect the column position
+      $tmp = substr($tmp, strrpos($tmp, "\n") + 1);
+      if ($tmp === false) {
+        $tmp = '';
+      }
+    }
+    // update column count
+    $this->col += strlen($tmp);
+    if ($token === T_CURLY_OPEN || $token === T_DOLLAR_OPEN_CURLY_BRACES || $text === '{') {
+      ++$this->depth;
+      $this->prelude = false;
+    } elseif ($text == '}') {
+      --$this->depth;
+    }
+    if ($token === T_FUNCTION) {
+      $this->prelude = true;
+    }
+    return array($token, $text);
+  }
+  function prelude() {
+    return $this->prelude;
+  }
+  function depth() {
+    return $this->depth;
+  }
+  function lineNumber() {
+    return $this->line;
+  }
+  function columnNumber() {
+    return $this->col;
+  }
+  function fileName() {
+    return $this->filename;
+  }
+  function line() {
+    return $this->lines[$this->line - 1];
+  }
+}
+
+class FileTypeFilter {
+  protected $pattern;
+  protected $callback;
+  function __construct($pattern, $callback) {
+    $this->pattern = $pattern;
+    $this->callback = $callback;
+  }
+  static function bind($pattern, $callback) {
+    return array(new self($pattern, $callback), 'apply');
+  }
+  function apply($value) {
+    if (preg_match($this->pattern, $value)) {
+      call_user_func($this->callback, $value);
+    }
+  }
+}
+
+class ComboFinder {
+  protected $finders;
+  function __construct($finders) {
+    $this->finders = $finders;
+  }
+  static function bindArray($args) {
+    return array(new self($args), 'apply');
+  }
+  static function bind() {
+    return array(new self(func_get_args()), 'apply');
+  }
+  function apply($value) {
+    $scanner = new PhpSourceScanner($value);
+    foreach ($this->finders as $finder) {
+      $finder->init();
+    }
+    while ($token = $scanner->next()) {
+      foreach ($this->finders as $finder) {
+        $finder->acceptNext($scanner, $token);
+      }
+    }
+  }
+}
+
+class ServerStateFinder {
+  protected $callback;
+  function __construct($callback) {
+    $this->callback = $callback;
+  }
+  static function bind($callback) {
+    return array(new self($callback), 'apply');
+  }
+  function init() {
+    $this->scope = false;
+  }
+  function acceptNext($scanner, $token) {
+    $rule = null;
+    if ($token[0] === T_EXIT) {
+      $rule = 'SERVERSTATE:EXIT';
+    } elseif ($token[0] === T_STRING) {
+      if (!$this->scope) {
+        $fname = strtolower($token[1]);
+        if ($fname === 'header') {
+          $rule = 'SERVERSTATE:HEADER';
+        } elseif ($fname === 'session_start') {
+          $rule = 'SERVERSTATE:SESSION';
+        } elseif ($fname === 'setrawcookie' || $fname === 'setcookie') {
+          $rule = 'SERVERSTATE:COOKIE';
+        }
+      }
+      $this->scope = false;
+    } elseif ($token[0] === T_PAAMAYIM_NEKUDOTAYIM || $token[0] === T_OBJECT_OPERATOR) {
+      $this->scope = true;
+    }
+    if ($rule) {
+      call_user_func($this->callback, $scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
+    }
+  }
+}
+
+class GlobalFinder {
+  protected $callback;
+  function __construct($callback) {
+    $this->callback = $callback;
+  }
+  static function bind($callback) {
+    return array(new self($callback), 'apply');
+  }
+  function init() {
+  }
+  function acceptNext($scanner, $token) {
+    $rule = null;
+    if ($token[0] === T_GLOBAL) {
+      $rule = 'GLOBAL:KEYWORD';
+    } elseif ($token[0] === T_VARIABLE && $token[1] === '$GLOBALS') {
+      $rule = 'GLOBAL:SUPER';
+    } elseif ($token[0] === T_VARIABLE && !$scanner->prelude() && $scanner->depth() === 0) {
+      $rule = 'GLOBAL:IMPLICIT';
+    }
+    if ($rule) {
+      call_user_func($this->callback, $scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
+    }
+  }
+}
+
+class StaticFinder {
+  protected $callback;
+  function __construct($callback) {
+    $this->callback = $callback;
+  }
+  static function bind($callback) {
+    return array(new self($callback), 'apply');
+  }
+  function init() {
+    $this->parent = false;
+    $this->self = false;
+    $this->paamayim = false;
+    $this->found = null;
+  }
+  function acceptNext($scanner, $token) {
+    $rule = null;
+    if ($this->found && $token[1] === '(') {
+      $rule = 'STATIC:CALL';
+    } elseif ($this->found) {
+      $rule = 'STATIC:REFERENCE';
+    }
+    if ($rule) {
+      call_user_func($this->callback, $scanner->fileName(), $this->found[0], $this->found[1], $this->found[2], $rule, $this->found[3]);
+    }
+    if ($token[0] === T_STRING && $this->paamayim && !$this->parent && !$this->self) {
+      $this->found = array(
+        $scanner->lineNumber(),
+        $scanner->columnNumber(),
+        strlen($token[1]),
+        $scanner->line());
+    } else {
+      $this->found = null;
+    }
+    $this->paamayim = $token[0] === T_PAAMAYIM_NEKUDOTAYIM;
+    if (!$this->paamayim) {
+      $this->parent = $token[0] === T_STRING && strtolower($token[1]) === 'parent';
+      $this->self = $token[0] === T_STRING && strtolower($token[1]) === 'self';
+    }
+  }
+}
+
+function result_printer_plain($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
+  global $path;
+  $fileName = preg_replace('/^'.preg_quote($path."/", '/').'/', '', $fileName);
+  $formatted = ltrim($text);
+  print "{$rule} in {$fileName} at line {$lineNumber}\n    {$formatted}\n";
+}
+
+function result_printer_color($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
+  global $path;
+  $fileName = preg_replace('/^'.preg_quote($path."/", '/').'/', '', $fileName);
+  $columnNumber = ($columnNumber - 1) - $length;
+  $before = substr($text, 0, $columnNumber);
+  $match = substr($text, $columnNumber, $length);
+  $after = substr($text, ($columnNumber) + $length);
+  $formatted = ltrim($before)."\033[31m".$match."\033[0m".$after;
+  print "\033[33m{$rule}\033[35m in \033[34m{$fileName}\033[35m at line {$lineNumber}\033[0m\n    {$formatted}\n";
+}
+
+$printer = 'result_printer_plain';
+$path = getcwd();
+
+$inc_static = true;
+$inc_global = true;
+$inc_server_state = true;
+
+$args = $_SERVER['argv'];
+array_shift($args);
+foreach ($args as $arg) {
+  if ($arg == '--color') {
+    $printer = 'result_printer_color';
+  } elseif ($arg == '--no-static') {
+    $inc_static = false;
+  } elseif ($arg == '--no-global') {
+    $inc_global = false;
+  } elseif ($arg == '--no-server-state') {
+    $inc_server_state = false;
+  } elseif ($arg == '--help') {
+    echo "USAGE: ".basename(__FILE__)." [OPTIONS] [PATH]\n";
+    echo "  OPTIONS:\n";
+    echo "    --color\n";
+    echo "    --no-static\n";
+    echo "    --no-global\n";
+    echo "    --no-server-state\n";
+    echo "    --help\n";
+    echo "  PATH defaults to current working dir.\n";
+    exit;
+  } else {
+    $path = realpath($arg);
+  }
+}
+
+$finders = array();
+if ($inc_static) {
+  $finders[] = new StaticFinder($printer);
+}
+if ($inc_global) {
+  $finders[] = new GlobalFinder($printer);
+}
+if ($inc_server_state) {
+  $finders[] = new ServerStateFinder($printer);
+}
+
+find_files(
+  $path,
+  FileTypeFilter::bind(
+    '/\.(php|inc)$/',
+    ComboFinder::bindArray($finders)));
+
