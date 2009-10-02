@@ -1,19 +1,42 @@
 #!/usr/local/bin/php
 <?php
 
-function find_files($dir, $callback) {
-  $d = dir($dir);
-  $entries = array();
-  while (false !== ($entry = $d->read())) {
-    $entries[] = $entry;
+class FileFinder {
+  protected $callback;
+  function __construct($callback) {
+    $this->callback = $callback;
   }
-  $d->close();
-  foreach ($entries as $entry) {
-    $fullname = $dir."/".$entry;
-    if (is_dir($fullname) && $entry !== '.' && $entry !== '..') {
-      find_files($fullname, $callback);
-    } elseif (is_file($fullname)) {
-      call_user_func($callback, $fullname);
+  function run($dir) {
+    $d = dir($dir);
+    $entries = array();
+    while (false !== ($entry = $d->read())) {
+      $entries[] = $entry;
+    }
+    $d->close();
+    foreach ($entries as $entry) {
+      $fullname = $dir."/".$entry;
+      if (is_dir($fullname) && $entry !== '.' && $entry !== '..') {
+        $this->run($fullname);
+      } elseif (is_file($fullname)) {
+        $this->apply($fullname);
+      }
+    }
+  }
+  protected function apply($fullname) {
+    call_user_func($this->callback, $fullname);
+  }
+}
+
+class TypedFileFinder extends FileFinder {
+  protected $pattern;
+  protected $callback;
+  function __construct($pattern, $callback) {
+    $this->pattern = $pattern;
+    $this->callback = $callback;
+  }
+  protected function apply($fullname) {
+    if (preg_match($this->pattern, $fullname)) {
+      call_user_func($this->callback, $fullname);
     }
   }
 }
@@ -90,23 +113,6 @@ class PhpSourceScanner {
   }
   function line() {
     return $this->lines[$this->line - 1];
-  }
-}
-
-class FileTypeFilter {
-  protected $pattern;
-  protected $callback;
-  function __construct($pattern, $callback) {
-    $this->pattern = $pattern;
-    $this->callback = $callback;
-  }
-  static function bind($pattern, $callback) {
-    return array(new self($pattern, $callback), 'apply');
-  }
-  function apply($value) {
-    if (preg_match($this->pattern, $value)) {
-      call_user_func($this->callback, $value);
-    }
   }
 }
 
@@ -364,21 +370,15 @@ foreach ($args as $arg) {
   }
 }
 
+$finder = ComboFinder::bind(
+  new StaticFinder($printer),
+  new GlobalFinder($printer),
+  new ApplicationStateFinder($printer),
+  new HackFinder($printer));
+
 if (is_file($printer->path())) {
-  $finder = ComboFinder::bind(
-    new StaticFinder($printer),
-    new GlobalFinder($printer),
-    new ApplicationStateFinder($printer),
-    new HackFinder($printer));
   call_user_func($finder, $printer->path());
 } else {
-  find_files(
-    $printer->path(),
-    FileTypeFilter::bind(
-      '/\.(php|inc)$/',
-      ComboFinder::bind(
-        new StaticFinder($printer),
-        new GlobalFinder($printer),
-        new ApplicationStateFinder($printer),
-        new HackFinder($printer))));
+  $files = new TypedFileFinder('/\.(php|inc)$/', $finder);
+  $files->run($printer->path());
 }
