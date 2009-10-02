@@ -135,12 +135,9 @@ class ComboFinder {
 }
 
 class ApplicationStateFinder {
-  protected $callback;
-  function __construct($callback) {
-    $this->callback = $callback;
-  }
-  static function bind($callback) {
-    return array(new self($callback), 'apply');
+  protected $printer;
+  function __construct($printer) {
+    $this->printer = $printer;
   }
   function init() {
     $this->scope = false;
@@ -165,18 +162,15 @@ class ApplicationStateFinder {
       $this->scope = true;
     }
     if ($rule) {
-      call_user_func($this->callback, $scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
+      $this->printer->printResult($scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
     }
   }
 }
 
 class GlobalFinder {
-  protected $callback;
-  function __construct($callback) {
-    $this->callback = $callback;
-  }
-  static function bind($callback) {
-    return array(new self($callback), 'apply');
+  protected $printer;
+  function __construct($printer) {
+    $this->printer = $printer;
   }
   function init() {
   }
@@ -190,18 +184,15 @@ class GlobalFinder {
       $rule = 'GLOBAL:IMPLICIT';
     }
     if ($rule) {
-      call_user_func($this->callback, $scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
+      $this->printer->printResult($scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
     }
   }
 }
 
 class StaticFinder {
-  protected $callback;
-  function __construct($callback) {
-    $this->callback = $callback;
-  }
-  static function bind($callback) {
-    return array(new self($callback), 'apply');
+  protected $printer;
+  function __construct($printer) {
+    $this->printer = $printer;
   }
   function init() {
     $this->parent = false;
@@ -217,7 +208,7 @@ class StaticFinder {
       $rule = 'STATIC:REFERENCE';
     }
     if ($rule) {
-      call_user_func($this->callback, $scanner->fileName(), $this->found[0], $this->found[1], $this->found[2], $rule, $this->found[3]);
+      $this->printer->printResult($scanner->fileName(), $this->found[0], $this->found[1], $this->found[2], $rule, $this->found[3]);
     }
     if ($token[0] === T_STRING && $this->paamayim && !$this->parent && !$this->self) {
       $this->found = array(
@@ -236,77 +227,158 @@ class StaticFinder {
   }
 }
 
-function result_printer_plain($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
-  global $path;
-  $fileName = preg_replace('/^'.preg_quote($path."/", '/').'/', '', $fileName);
-  $formatted = ltrim($text);
-  print "{$rule} in {$fileName} at line {$lineNumber}\n    {$formatted}\n";
+class HackFinder {
+  protected $printer;
+  function __construct($printer) {
+    $this->printer = $printer;
+  }
+  function init() {
+  }
+  function acceptNext($scanner, $token) {
+    $rule = null;
+    if ($token[0] === T_STRING && $token[1] === '@') {
+      $rule = 'HACK:SUPRESSED';
+    } elseif ($token[0] === T_DECLARE) {
+      $rule = 'HACK:DECLARE';
+    } elseif ($token[0] === T_HALT_COMPILER) {
+      $rule = 'HACK:HALT_COMPILER';
+    }
+    if ($rule) {
+      $this->printer->printResult($scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
+    }
+  }
 }
 
-function result_printer_color($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
-  global $path;
-  $fileName = preg_replace('/^'.preg_quote($path."/", '/').'/', '', $fileName);
-  $columnNumber = ($columnNumber - 1) - $length;
-  $before = substr($text, 0, $columnNumber);
-  $match = substr($text, $columnNumber, $length);
-  $after = substr($text, ($columnNumber) + $length);
-  $formatted = ltrim($before)."\033[31m".$match."\033[0m".$after;
-  print "\033[33m{$rule}\033[35m in \033[34m{$fileName}\033[35m at line {$lineNumber}\033[0m\n    {$formatted}\n";
+class ResultPrinter {
+  protected $path;
+  protected $showCode = true;
+  protected $color = false;
+  protected $rulesShow = array();
+  protected $rulesHide = array();
+  function __construct($path) {
+    $this->path = $path;
+  }
+  function setPath($path) {
+    $this->path = $path;
+  }
+  function path() {
+    return $this->path;
+  }
+  function setShowCode($enabled = true) {
+    $this->showCode = $enabled;
+  }
+  function setColor($enabled = true) {
+    $this->color = $enabled;
+  }
+  function showRule($rule) {
+    $this->rulesShow[] = '^'.preg_quote(strtoupper($rule));
+  }
+  function hideRule($rule) {
+    $this->rulesHide[] = '^'.preg_quote(strtoupper($rule));
+  }
+  function printResult($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
+    if (count($this->rulesShow) > 0 && !preg_match('/'.implode('|', $this->rulesShow).'/', $rule)) {
+      return;
+    }
+    if (count($this->rulesHide) > 0 && preg_match('/'.implode('|', $this->rulesHide).'/', $rule)) {
+      return;
+    }
+    $fileName = preg_replace('/^'.preg_quote($this->path."/", '/').'/', '', $fileName);
+    if ($this->color) {
+      print $this->formatColor($fileName, $lineNumber, $columnNumber, $length, $rule, $text);
+    } else {
+      print $this->formatPlain($fileName, $lineNumber, $columnNumber, $length, $rule, $text);
+    }
+  }
+  protected function formatPlain($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
+    if ($this->showCode) {
+      $formatted = ltrim($text);
+      return "{$rule} in {$fileName} at line {$lineNumber}\n    {$formatted}\n";
+    } else {
+      return "{$rule} in {$fileName} at line {$lineNumber}\n";
+    }
+  }
+  protected function formatColor($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
+    $columnNumber = ($columnNumber - 1) - $length;
+    $before = substr($text, 0, $columnNumber);
+    $match = substr($text, $columnNumber, $length);
+    $after = substr($text, ($columnNumber) + $length);
+    if ($this->showCode) {
+      $formatted = ltrim($before)."\033[31m".$match."\033[0m".$after;
+      return "\033[33m{$rule}\033[35m in \033[34m{$fileName}\033[35m at line {$lineNumber}\033[0m\n    {$formatted}\n";
+    } else {
+      return "\033[33m{$rule}\033[35m in \033[34m{$fileName}\033[35m at line {$lineNumber}\033[0m\n";
+    }
+  }
 }
 
-$printer = 'result_printer_plain';
-$path = getcwd();
-
-$inc_static = true;
-$inc_global = true;
-$inc_application_state = true;
+error_reporting(E_ALL);
+$printer = new ResultPrinter(getcwd());
 
 $args = $_SERVER['argv'];
 array_shift($args);
 foreach ($args as $arg) {
   if ($arg == '--color') {
-    $printer = 'result_printer_color';
+    $printer->setColor(true);
+  } elseif ($arg == '--no-color') {
+    $printer->setColor(false);
   } elseif ($arg == '--no-static') {
-    $inc_static = false;
+    $printer->hideRule('STATIC:');
   } elseif ($arg == '--no-global') {
-    $inc_global = false;
+    $printer->hideRule('GLOBAL:');
   } elseif ($arg == '--no-application-state') {
-    $inc_application_state = false;
+    $printer->hideRule('APPLICATIONSTATE:');
+  } elseif ($arg == '--code') {
+    $printer->setShowCode(true);
+  } elseif ($arg == '--no-code') {
+    $printer->setShowCode(false);
   } elseif ($arg == '--help') {
+    echo "php bad scanner. Audits PHP code for testability.\n";
     echo "USAGE: ".basename(__FILE__)." [OPTIONS] [PATH]\n";
     echo "  OPTIONS:\n";
     echo "    --color          Print results in color.\n";
+    echo "    --no-color       Don't use ansi color in output (DEFAULT).\n";
+    echo "    --code           Display the offending line of code in the results (DEFAULT).\n";
+    echo "    --no-code        Don't display the offending line of code in the results.\n";
     echo "    --no-static      Disable rules for static symbols.\n";
     echo "    --no-global      Disable rules for global variables.\n";
     echo "    --no-application-state\n";
     echo "                     Disable rules for application state.\n";
+    echo "    --show=RULE      Only show these rule(s). Multiple rules can be separated by a comma.\n";
+    echo "    --hide=RULE      Don't show these rule(s). Multiple rules can be separated by a comma.\n";
     echo "    --help           Show this help.\n";
     echo "  PATH defaults to current working dir.\n";
     exit;
+  } elseif (preg_match('/^--show=[\'"]?(.+)[\'"]?$/', $arg, $mm)) {
+    foreach (explode(',', $mm[1]) as $rule) {
+      $printer->showRule($rule);
+    }
+  } elseif (preg_match('/^--hide=[\'"]?(.+)[\'"]?$/', $arg, $mm)) {
+    foreach (explode(',', $mm[1]) as $rule) {
+      $printer->hideRule($rule);
+    }
+  } elseif (preg_match('/^--[a-z]+/', $arg)) {
+    throw new Exception("Unknown argument '$arg'");
   } else {
-    $path = realpath($arg);
+    $printer->setPath(realpath($arg));
   }
 }
 
-$finders = array();
-if ($inc_static) {
-  $finders[] = new StaticFinder($printer);
-}
-if ($inc_global) {
-  $finders[] = new GlobalFinder($printer);
-}
-if ($inc_application_state) {
-  $finders[] = new ApplicationStateFinder($printer);
-}
-
-if (is_file($path)) {
-  $finder = ComboFinder::bindArray($finders);
-  call_user_func($finder, $path);
+if (is_file($printer->path())) {
+  $finder = ComboFinder::bind(
+    new StaticFinder($printer),
+    new GlobalFinder($printer),
+    new ApplicationStateFinder($printer),
+    new HackFinder($printer));
+  call_user_func($finder, $printer->path());
 } else {
   find_files(
-    $path,
+    $printer->path(),
     FileTypeFilter::bind(
       '/\.(php|inc)$/',
-      ComboFinder::bindArray($finders)));
+      ComboFinder::bind(
+        new StaticFinder($printer),
+        new GlobalFinder($printer),
+        new ApplicationStateFinder($printer),
+        new HackFinder($printer))));
 }
-
