@@ -1,1 +1,18 @@
 A tool for scanning php code for various patterns of global symbols.
+
+    php bad scanner. Audits PHP code for testability.
+    USAGE: php-bad-scanner [OPTIONS] [PATH]
+      OPTIONS:
+        --color          Print results in color.
+        --no-color       Don't use ansi color in output (DEFAULT).
+        --code           Display the offending line of code in the results (DEFAULT).
+        --no-code        Don't display the offending line of code in the results.
+        --no-static      Disable rules for static symbols.
+        --no-global      Disable rules for global variables.
+        --no-application-state
+                         Disable rules for application state.
+        --show=RULE      Only show these rule(s). Multiple rules can be separated by a comma.
+        --hide=RULE      Don't show these rule(s). Multiple rules can be separated by a comma.
+        --help           Show this help.
+      PATH defaults to current working dir.
+
