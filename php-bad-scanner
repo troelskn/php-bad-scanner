@@ -179,6 +179,7 @@ class GlobalFinder {
     $this->printer = $printer;
   }
   function init() {
+    $this->paamayim = false;
   }
   function acceptNext($scanner, $token) {
     $rule = null;
@@ -186,9 +187,10 @@ class GlobalFinder {
       $rule = 'GLOBAL:KEYWORD';
     } elseif ($token[0] === T_VARIABLE && $token[1] === '$GLOBALS') {
       $rule = 'GLOBAL:SUPER';
-    } elseif ($token[0] === T_VARIABLE && !$scanner->prelude() && $scanner->depth() === 0) {
+    } elseif ($token[0] === T_VARIABLE && !$this->paamayim && !$scanner->prelude() && $scanner->depth() === 0) {
       $rule = 'GLOBAL:IMPLICIT';
     }
+    $this->paamayim = $token[0] === T_PAAMAYIM_NEKUDOTAYIM;
     if ($rule) {
       $this->printer->printResult($scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), $rule, $scanner->line());
     }
@@ -209,12 +211,7 @@ class StaticFinder {
   function acceptNext($scanner, $token) {
     $rule = null;
     if ($this->found && $token[1] === '(') {
-      $rule = 'STATIC:CALL';
-    } elseif ($this->found) {
-      $rule = 'STATIC:REFERENCE';
-    }
-    if ($rule) {
-      $this->printer->printResult($scanner->fileName(), $this->found[0], $this->found[1], $this->found[2], $rule, $this->found[3]);
+      $this->printer->printResult($scanner->fileName(), $this->found[0], $this->found[1], $this->found[2], 'STATIC:CALL', $this->found[3]);
     }
     if ($token[0] === T_STRING && $this->paamayim && !$this->parent && !$this->self) {
       $this->found = array(
@@ -222,6 +219,9 @@ class StaticFinder {
         $scanner->columnNumber(),
         strlen($token[1]),
         $scanner->line());
+    } elseif ($token[0] === T_VARIABLE && $this->paamayim && !$this->parent && !$this->self) {
+      $this->printer->printResult($scanner->fileName(), $scanner->lineNumber(), $scanner->columnNumber(), strlen($token[1]), 'STATIC:REFERENCE', $scanner->line());
+      $this->found = null;
     } else {
       $this->found = null;
     }
@@ -259,6 +259,7 @@ class ResultPrinter {
   protected $path;
   protected $showCode = true;
   protected $color = false;
+  protected $summary = false;
   protected $rulesShow = array();
   protected $rulesHide = array();
   function __construct($path) {
@@ -269,6 +270,9 @@ class ResultPrinter {
   }
   function path() {
     return $this->path;
+  }
+  function setSummary($enabled = true) {
+    $this->summary = $enabled;
   }
   function setShowCode($enabled = true) {
     $this->showCode = $enabled;
@@ -290,10 +294,37 @@ class ResultPrinter {
       return;
     }
     $fileName = preg_replace('/^'.preg_quote($this->path."/", '/').'/', '', $fileName);
-    if ($this->color) {
+    if ($this->summary) {
+      $this->summarise($fileName, $rule);
+    } elseif ($this->color) {
       print $this->formatColor($fileName, $lineNumber, $columnNumber, $length, $rule, $text);
     } else {
       print $this->formatPlain($fileName, $lineNumber, $columnNumber, $length, $rule, $text);
+    }
+  }
+  function summarise($fileName, $rule) {
+    if (!isset($this->summary_data[$fileName])) {
+      $this->summary_data[$fileName] = array();
+    }
+    if (!isset($this->summary_data[$fileName][$rule])) {
+      $this->summary_data[$fileName][$rule] = 0;
+    }
+    $this->summary_data[$fileName][$rule]++;
+  }
+  function tally() {
+    if ($this->summary) {
+      foreach ($this->summary_data as $fileName => $violations) {
+        print $fileName . ":\n";
+        $total = 0;
+        foreach ($violations as $rule => $count) {
+          $total += $count;
+          print "    " . str_pad($rule, 30) . " " . str_pad($count, 3, " ", STR_PAD_LEFT) . "\n";
+        }
+        file_get_contents($fileName);
+        $total_lines = substr_count(str_replace("\r\n", "\n", file_get_contents($fileName)), "\n");
+        print "    " . str_pad("Violations per Lines of Code", 30) . " " . str_pad($total . "/" . $total_lines, 10);
+        print round(100 * ($total / $total_lines)) . "%\n";
+      }
     }
   }
   protected function formatPlain($fileName, $lineNumber, $columnNumber, $length, $rule, $text) {
@@ -328,6 +359,8 @@ foreach ($args as $arg) {
     $printer->setColor(true);
   } elseif ($arg == '--no-color') {
     $printer->setColor(false);
+  } elseif ($arg == '--summary') {
+    $printer->setSummary(true);
   } elseif ($arg == '--no-static') {
     $printer->hideRule('STATIC:');
   } elseif ($arg == '--no-global') {
@@ -342,6 +375,7 @@ foreach ($args as $arg) {
     echo "php bad scanner. Audits PHP code for testability.\n";
     echo "USAGE: ".basename(__FILE__)." [OPTIONS] [PATH]\n";
     echo "  OPTIONS:\n";
+    echo "    --summary        Print a summary of the results.\n";
     echo "    --color          Print results in color.\n";
     echo "    --no-color       Don't use ansi color in output (DEFAULT).\n";
     echo "    --code           Display the offending line of code in the results (DEFAULT).\n";
@@ -382,3 +416,4 @@ if (is_file($printer->path())) {
   $files = new TypedFileFinder('/\.(php|inc)$/', $finder);
   $files->run($printer->path());
 }
+$printer->tally();
